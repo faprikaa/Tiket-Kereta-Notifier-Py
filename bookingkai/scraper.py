@@ -206,23 +206,45 @@ async def _fetch_with_nodriver(search_url: str) -> list[Train]:
     """Fetch trains using nodriver (undetected headless Chrome).
 
     This can solve Cloudflare JS challenges since it runs a real browser.
+    Strategy: visit homepage first to solve CF, then navigate to search URL.
     """
     browser = await _get_nodriver_browser()
 
-    logger.info("nodriver: navigating to %s", search_url)
-    tab = await browser.get(search_url)
+    # Step 1: Visit homepage first to pass Cloudflare challenge
+    logger.info("nodriver: visiting homepage to solve CF challenge...")
+    tab = await browser.get("https://booking.kai.id/")
 
-    # Wait for page to load and any CF challenge to resolve
-    await tab.sleep(5)
+    # Wait for CF challenge to resolve
+    await tab.sleep(8)
 
-    # Try verify_cf() in case there's a Turnstile challenge
+    # Try verify_cf() in case there's a Turnstile checkbox
     try:
         await tab.verify_cf()
-        await tab.sleep(3)
+        await tab.sleep(5)
     except Exception:
-        pass  # No CF challenge present, that's fine
+        pass
 
-    # Wait and ensure the page is loaded
+    # Check if we passed CF on homepage
+    await tab
+    home_html = await tab.get_content()
+    if is_cloudflare_challenge(home_html):
+        # Wait more and retry
+        logger.debug("nodriver: still on CF challenge, waiting longer...")
+        await tab.sleep(10)
+        await tab
+        home_html = await tab.get_content()
+        if is_cloudflare_challenge(home_html):
+            try:
+                await tab.close()
+            except Exception:
+                pass
+            raise RuntimeError("nodriver: could not bypass Cloudflare on homepage")
+
+    logger.info("nodriver: CF challenge passed, navigating to search...")
+
+    # Step 2: Navigate to search URL (cookies carry over)
+    tab = await browser.get(search_url)
+    await tab.sleep(5)
     await tab
 
     html_content = await tab.get_content()

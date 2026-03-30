@@ -156,27 +156,28 @@ class CloudflaredTunnel:
         """Read stderr line by line looking for the tunnel URL."""
         url_pattern = re.compile(r"https://[a-zA-Z0-9\-]+\.trycloudflare\.com")
 
-        try:
-            async with asyncio.timeout(timeout):
-                while True:
-                    if self._process is None or self._process.stderr is None:
-                        return None
+        async def _read_lines() -> str | None:
+            while True:
+                if self._process is None or self._process.stderr is None:
+                    return None
 
-                    line = await self._process.stderr.readline()
-                    if not line:
-                        break
+                line = await self._process.stderr.readline()
+                if not line:
+                    break
 
-                    decoded = line.decode("utf-8", errors="replace").strip()
-                    if decoded:
-                        logger.debug("cloudflared: %s", decoded)
+                decoded = line.decode("utf-8", errors="replace").strip()
+                if decoded:
+                    logger.debug("cloudflared: %s", decoded)
 
-                    match = url_pattern.search(decoded)
-                    if match:
-                        return match.group(0)
-        except asyncio.TimeoutError:
+                match = url_pattern.search(decoded)
+                if match:
+                    return match.group(0)
             return None
 
-        return None
+        try:
+            return await asyncio.wait_for(_read_lines(), timeout=timeout)
+        except asyncio.TimeoutError:
+            return None
 
     async def stop(self) -> None:
         """Stop the cloudflared tunnel."""
