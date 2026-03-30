@@ -1,13 +1,15 @@
 """BookingKAI scraper with Cloudflare bypass.
 
-Primary: curl_cffi with browser impersonation and persistent session cookies.
-Fallback: nodriver (undetected Chrome via CDP) when Cloudflare blocks curl_cffi.
+Primary: curl_cffi with browser impersonation (no custom header overrides).
+Fallback: nodriver with Xvfb virtual display (non-headless, undetectable).
 """
 
 from __future__ import annotations
 
 import asyncio
 import logging
+import os
+import shutil
 from urllib.parse import quote
 
 from bs4 import BeautifulSoup
@@ -34,27 +36,10 @@ MONTH_NAMES = [
     "Desember",
 ]
 
-# Request headers mimicking a real browser
-HEADERS = {
-    "accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8",
-    "accept-language": "id-ID,id;q=0.9,en-US;q=0.8,en;q=0.7",
-    "cache-control": "no-cache",
-    "pragma": "no-cache",
-    "sec-ch-ua": '"Chromium";v="136", "Google Chrome";v="136", "Not.A/Brand";v="99"',
-    "sec-ch-ua-mobile": "?0",
-    "sec-ch-ua-platform": '"Linux"',
-    "sec-fetch-dest": "document",
-    "sec-fetch-mode": "navigate",
-    "sec-fetch-site": "same-origin",
-    "sec-fetch-user": "?1",
-    "sec-gpc": "1",
-    "upgrade-insecure-requests": "1",
-    "referer": "https://booking.kai.id/",
-}
-
 # ---------- Shared state for nodriver browser ----------
 _nodriver_browser = None
 _nodriver_lock = asyncio.Lock()
+_virtual_display = None
 
 
 def format_date_indo(date_str: str) -> str:
@@ -69,13 +54,7 @@ def format_date_indo(date_str: str) -> str:
 
 
 def build_search_url(origin: str, destination: str, date: str) -> str:
-    """Build the booking.kai.id search URL.
-
-    Args:
-        origin: Station code (e.g. 'PSE')
-        destination: Station code (e.g. 'LPN')
-        date: Date in YYYY-MM-DD format
-    """
+    """Build the booking.kai.id search URL."""
     date_indo = format_date_indo(date)
     return (
         f"https://booking.kai.id/"
@@ -94,6 +73,7 @@ def is_cloudflare_challenge(html_content: str) -> bool:
         "challenge-platform",
         "Just a moment",
         "cf-browser-verification",
+        "Checking if the site connection is secure",
     ]
     return any(marker in html_content for marker in markers)
 
@@ -106,15 +86,14 @@ async def _fetch_with_curl_cffi(
 ) -> list[Train]:
     """Fetch trains using curl_cffi with browser impersonation.
 
-    Uses a persistent session to maintain cookies across requests.
-    First visits the homepage to obtain cf_clearance cookies, then
-    hits the search URL.
+    IMPORTANT: Do NOT pass custom headers when using impersonate mode.
+    curl_cffi generates matching headers for the impersonated browser.
+    Custom headers create fingerprint mismatches that Cloudflare detects.
     """
     from curl_cffi.requests import AsyncSession
 
     async with AsyncSession(impersonate="chrome") as session:
         base_kwargs: dict = {
-            "headers": HEADERS,
             "timeout": 60,
             "allow_redirects": True,
         }
@@ -159,7 +138,45 @@ async def _fetch_with_curl_cffi(
         return trains
 
 
-# ========== Fallback: nodriver (headless Chrome via CDP) ==========
+# ========== Fallback: nodriver with Xvfb (non-headless) ==========
+
+def _has_display() -> bool:
+    """Check if a display server is available."""
+    return bool(os.environ.get("DISPLAY"))
+
+
+def _start_virtual_display():
+    """Start Xvfb virtual display if no display is available."""
+    global _virtual_display
+
+    if _has_display():
+        logger.debug("nodriver: display already available (%s)", os.environ["DISPLAY"])
+        return
+
+    # Check if Xvfb is installed
+    if not shutil.which("Xvfb") and not shutil.which("xvfb-run"):
+        logger.warning(
+            "nodriver: Xvfb not found. Install with: apt install xvfb. "
+            "Falling back to headless mode."
+        )
+        return
+
+    try:
+        from pyvirtualdisplay import Display
+
+        _virtual_display = Display(visible=0, size=(1920, 1080))
+        _virtual_display.start()
+        logger.info("nodriver: virtual display started (Xvfb)")
+    except ImportError:
+        # pyvirtualdisplay not installed, try manual Xvfb
+        logger.warning(
+            "nodriver: pyvirtualdisplay not installed. "
+            "Install with: pip install pyvirtualdisplay. "
+            "Falling back to headless mode."
+        )
+    except Exception as e:
+        logger.warning("nodriver: failed to start virtual display: %s", e)
+
 
 async def _get_nodriver_browser():
     """Get or create the shared nodriver browser instance."""
@@ -176,12 +193,21 @@ async def _get_nodriver_browser():
                 "nodriver is not installed. Install with: pip install nodriver"
             )
 
-        logger.info("nodriver: starting headless Chrome browser...")
+        # Start virtual display if needed (non-headless is much harder to detect)
+        _start_virtual_display()
+
+        # Use headless only if we have no display at all
+        use_headless = not _has_display()
+        if use_headless:
+            logger.info("nodriver: starting in headless mode (no display available)")
+        else:
+            logger.info("nodriver: starting in non-headless mode (display available)")
+
+        logger.info("nodriver: starting Chrome browser...")
         _nodriver_browser = await uc.start(
-            headless=True,
+            headless=use_headless,
             browser_args=[
                 "--no-sandbox",
-                "--disable-gpu",
                 "--disable-dev-shm-usage",
             ],
         )
@@ -189,8 +215,8 @@ async def _get_nodriver_browser():
 
 
 async def close_nodriver_browser() -> None:
-    """Close the shared nodriver browser (for cleanup)."""
-    global _nodriver_browser
+    """Close the shared nodriver browser and virtual display."""
+    global _nodriver_browser, _virtual_display
 
     async with _nodriver_lock:
         if _nodriver_browser is not None:
@@ -201,12 +227,20 @@ async def close_nodriver_browser() -> None:
             _nodriver_browser = None
             logger.info("nodriver: browser closed")
 
+        if _virtual_display is not None:
+            try:
+                _virtual_display.stop()
+            except Exception:
+                pass
+            _virtual_display = None
+            logger.info("nodriver: virtual display stopped")
+
 
 async def _fetch_with_nodriver(search_url: str) -> list[Train]:
-    """Fetch trains using nodriver (undetected headless Chrome).
+    """Fetch trains using nodriver (undetected Chrome via Xvfb).
 
-    This can solve Cloudflare JS challenges since it runs a real browser.
-    Strategy: visit homepage first to solve CF, then navigate to search URL.
+    Strategy: visit homepage first to solve CF challenge, then navigate
+    to the search URL with cookies already established.
     """
     browser = await _get_nodriver_browser()
 
@@ -214,10 +248,10 @@ async def _fetch_with_nodriver(search_url: str) -> list[Train]:
     logger.info("nodriver: visiting homepage to solve CF challenge...")
     tab = await browser.get("https://booking.kai.id/")
 
-    # Wait for CF challenge to resolve
-    await tab.sleep(8)
+    # Wait for CF challenge to resolve (give it plenty of time)
+    await tab.sleep(10)
 
-    # Try verify_cf() in case there's a Turnstile checkbox
+    # Try verify_cf() for Turnstile checkbox
     try:
         await tab.verify_cf()
         await tab.sleep(5)
@@ -228,9 +262,14 @@ async def _fetch_with_nodriver(search_url: str) -> list[Train]:
     await tab
     home_html = await tab.get_content()
     if is_cloudflare_challenge(home_html):
-        # Wait more and retry
-        logger.debug("nodriver: still on CF challenge, waiting longer...")
-        await tab.sleep(10)
+        # Wait more and retry verify_cf
+        logger.debug("nodriver: still on CF challenge, retrying...")
+        await tab.sleep(8)
+        try:
+            await tab.verify_cf()
+            await tab.sleep(5)
+        except Exception:
+            pass
         await tab
         home_html = await tab.get_content()
         if is_cloudflare_challenge(home_html):
@@ -244,7 +283,7 @@ async def _fetch_with_nodriver(search_url: str) -> list[Train]:
 
     # Step 2: Navigate to search URL (cookies carry over)
     tab = await browser.get(search_url)
-    await tab.sleep(5)
+    await tab.sleep(6)
     await tab
 
     html_content = await tab.get_content()
@@ -274,14 +313,7 @@ async def fetch_trains(
 
     Strategy:
     1. Try curl_cffi with browser impersonation (fast, lightweight)
-    2. If blocked by Cloudflare, fall back to nodriver (headless Chrome)
-
-    Args:
-        search_url: The full booking.kai.id search URL
-        proxy_url: Optional SOCKS5/HTTP proxy URL
-
-    Returns:
-        List of Train objects parsed from the HTML response
+    2. If blocked by Cloudflare, fall back to nodriver (real Chrome + Xvfb)
 
     Raises:
         RuntimeError: If both methods fail
@@ -309,15 +341,10 @@ async def fetch_trains(
 # ========== HTML Parsing ==========
 
 def parse_html(raw_html: str) -> list[Train]:
-    """Extract train information from the booking.kai.id search results page.
-
-    Looks for div elements with classes 'data-block list-kereta', then
-    extracts train data from hidden input fields and availability indicators.
-    """
+    """Extract train information from the booking.kai.id search results page."""
     soup = BeautifulSoup(raw_html, "lxml")
     trains: list[Train] = []
 
-    # Find all data-block list-kereta divs
     data_blocks = soup.find_all("div", class_=lambda c: c and "data-block" in c and "list-kereta" in c)
 
     for block in data_blocks:
@@ -329,12 +356,7 @@ def parse_html(raw_html: str) -> list[Train]:
 
 
 def extract_train_from_block(block) -> Train:
-    """Extract train data from a data-block div.
-
-    Reads hidden inputs for train details and checks availability
-    via CSS classes and text content.
-    """
-    # Collect all hidden input values
+    """Extract train data from a data-block div."""
     inputs: dict[str, str] = {}
     for inp in block.find_all("input", type="hidden"):
         name = inp.get("name", "")
@@ -342,17 +364,14 @@ def extract_train_from_block(block) -> Train:
         if name:
             inputs[name] = value
 
-    # Determine availability
     availability = "AVAILABLE"
     seats_left = "1"
 
-    # Check for <a class="habis"> (sold out link)
     habis_link = block.find("a", class_=lambda c: c and "habis" in c)
     if habis_link:
         availability = "FULL"
         seats_left = "0"
 
-    # Check for <small class="sisa-kursi"> text
     sisa_kursi = block.find("small", class_=lambda c: c and "sisa-kursi" in c)
     if sisa_kursi:
         text = sisa_kursi.get_text(strip=True)
@@ -361,15 +380,13 @@ def extract_train_from_block(block) -> Train:
             seats_left = "0"
         elif text == "Tersedia":
             availability = "AVAILABLE"
-            seats_left = "1"  # KAI doesn't show exact count
+            seats_left = "1"
 
-    # Build class string from kelas_gerbong + subkelas
     class_str = inputs.get("kelas_gerbong", "")
     sub = inputs.get("subkelas", "")
     if sub:
         class_str += f" ({sub})"
 
-    # Format price
     price = inputs.get("harga", "")
     if price:
         price = f"Rp{format_number(price)}"

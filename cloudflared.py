@@ -149,8 +149,37 @@ class CloudflaredTunnel:
             )
 
         self._url = url
-        logger.info("Cloudflared tunnel ready: %s", url)
+        logger.info("Cloudflared tunnel URL found: %s", url)
+
+        # Wait for tunnel to be fully reachable (DNS propagation)
+        await self._wait_until_reachable(url)
+
+        logger.info("Cloudflared tunnel ready and reachable: %s", url)
         return url
+
+    async def _wait_until_reachable(self, url: str, timeout: float = 30.0) -> None:
+        """Wait until the tunnel URL is reachable via HTTP."""
+        import urllib.request
+        import urllib.error
+
+        deadline = asyncio.get_event_loop().time() + timeout
+        attempt = 0
+        while asyncio.get_event_loop().time() < deadline:
+            attempt += 1
+            try:
+                req = urllib.request.Request(url, method="HEAD")
+                # Run blocking HTTP check in a thread
+                await asyncio.get_event_loop().run_in_executor(
+                    None,
+                    lambda: urllib.request.urlopen(req, timeout=5),
+                )
+                logger.debug("Tunnel reachable after %d attempts", attempt)
+                return
+            except Exception:
+                logger.debug("Tunnel not reachable yet (attempt %d)...", attempt)
+                await asyncio.sleep(2)
+
+        logger.warning("Tunnel may not be fully reachable yet, proceeding anyway")
 
     async def _wait_for_url(self, timeout: float) -> str | None:
         """Read stderr line by line looking for the tunnel URL."""
