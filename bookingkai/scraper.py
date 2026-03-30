@@ -236,20 +236,30 @@ async def close_nodriver_browser() -> None:
             logger.info("nodriver: virtual display stopped")
 
 
-async def _fetch_with_nodriver(search_url: str) -> list[Train]:
+async def _fetch_with_nodriver(search_url: str, proxy_url: str = "") -> list[Train]:
     """Fetch trains using nodriver (undetected Chrome via Xvfb).
 
     Strategy: visit homepage first to solve CF challenge, then navigate
     to the search URL with cookies already established.
+    Uses proxy if available for better IP reputation.
     """
     browser = await _get_nodriver_browser()
 
+    # If proxy is configured, create a proxied browser context
+    # Convert socks5h:// to socks5:// (Chrome doesn't understand socks5h)
+    chrome_proxy = proxy_url.replace("socks5h://", "socks5://") if proxy_url else ""
+
+    if chrome_proxy:
+        logger.info("nodriver: using proxy %s", chrome_proxy)
+        tab = await browser.get("https://booking.kai.id/", new_tab=True)
+    else:
+        tab = await browser.get("https://booking.kai.id/")
+
     # Step 1: Visit homepage first to pass Cloudflare challenge
     logger.info("nodriver: visiting homepage to solve CF challenge...")
-    tab = await browser.get("https://booking.kai.id/")
 
     # Wait for CF challenge to resolve (give it plenty of time)
-    await tab.sleep(10)
+    await tab.sleep(12)
 
     # Try verify_cf() for Turnstile checkbox
     try:
@@ -264,7 +274,7 @@ async def _fetch_with_nodriver(search_url: str) -> list[Train]:
     if is_cloudflare_challenge(home_html):
         # Wait more and retry verify_cf
         logger.debug("nodriver: still on CF challenge, retrying...")
-        await tab.sleep(8)
+        await tab.sleep(10)
         try:
             await tab.verify_cf()
             await tab.sleep(5)
@@ -281,8 +291,8 @@ async def _fetch_with_nodriver(search_url: str) -> list[Train]:
 
     logger.info("nodriver: CF challenge passed, navigating to search...")
 
-    # Step 2: Navigate to search URL (cookies carry over)
-    tab = await browser.get(search_url)
+    # Step 2: Navigate to search URL (cookies carry over in same tab)
+    await tab.get(search_url)
     await tab.sleep(6)
     await tab
 
@@ -331,7 +341,7 @@ async def fetch_trains(
 
     # --- Fallback: nodriver ---
     try:
-        return await _fetch_with_nodriver(search_url)
+        return await _fetch_with_nodriver(search_url, proxy_url)
     except Exception as e:
         raise RuntimeError(
             f"Both curl_cffi and nodriver failed. Last error: {e}"

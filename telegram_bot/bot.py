@@ -68,20 +68,39 @@ class TelegramBot:
             port: Local port to listen on
             webhook_url: Public URL that Telegram will call
         """
+        import asyncio
+
         if not self._app:
             raise RuntimeError("Bot not built. Call build() first.")
 
         logger.info("Starting bot in webhook mode on port %d...", port)
         await self._app.initialize()
         await self._app.start()
-        await self._app.updater.start_webhook(
-            listen="0.0.0.0",
-            port=port,
-            url_path="/webhook",
-            webhook_url=f"{webhook_url}/webhook",
-            allowed_updates=["message"],
-            drop_pending_updates=True,
-        )
+
+        # Retry webhook setup (DNS for cloudflared may take time to propagate)
+        max_retries = 5
+        for attempt in range(max_retries):
+            try:
+                await self._app.updater.start_webhook(
+                    listen="0.0.0.0",
+                    port=port,
+                    url_path="/webhook",
+                    webhook_url=f"{webhook_url}/webhook",
+                    allowed_updates=["message"],
+                    drop_pending_updates=True,
+                )
+                logger.info("Webhook set successfully: %s/webhook", webhook_url)
+                return
+            except Exception as e:
+                if attempt < max_retries - 1:
+                    wait = (attempt + 1) * 3
+                    logger.warning(
+                        "Webhook setup failed (attempt %d/%d): %s. Retrying in %ds...",
+                        attempt + 1, max_retries, e, wait,
+                    )
+                    await asyncio.sleep(wait)
+                else:
+                    raise
 
     async def stop(self) -> None:
         """Stop the bot gracefully."""
