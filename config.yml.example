@@ -1,0 +1,65 @@
+# yaml-language-server: $schema=./config.schema.json
+# Tiket Kereta Notifier (Python) - Configuration
+# Copy this file to config.yml and modify as needed
+
+telegram:
+  bot_token: "YOUR_BOT_TOKEN_HERE"
+  chat_id: "YOUR_CHAT_ID_HERE"
+
+# Webhook mode (optional). Set enabled: true and provide a public URL.
+# If disabled, bot runs in polling mode (recommended for local use).
+webhook:
+  enabled: false
+  port: 8080
+  url: ""  # e.g. "https://your-domain.com" - not needed if polling
+
+trains:
+  # Satu entry per kereta, hanya provider bookingkai yang diproses.
+  # Provider lain (traveloka, tiketkai, tiketcom) akan di-skip.
+
+  - name: BENGAWAN
+    origin: LPN
+    destination: CKR
+    date: "2026-04-05"
+    interval: 300
+    providers:
+      - bookingkai
+
+  # Wildcard: name "any" atau "*" = ambil semua kereta yang ada di rute tersebut
+  # - name: any
+  #   origin: GMR
+  #   destination: YK
+  #   date: "2026-04-02"
+  #   interval: 300
+  #   providers:
+  #     - bookingkai
+
+  # Filter harga: max_price = harga maksimal dalam Rupiah (0 atau tidak diisi = tanpa filter)
+  # - name: BENGAWAN
+  #   origin: LPN
+  #   destination: CKR
+  #   date: "2026-04-02"
+  #   interval: 300
+  #   max_price: 350000
+  #   providers:
+  #     - bookingkai
+
+  # Provider dengan proxy
+  # - name: ARGO DWIPANGGA
+  #   origin: GMR
+  #   destination: YK
+  #   date: "2026-02-17"
+  #   interval: 300
+  #   providers:
+  #     - name: bookingkai
+  #       proxy_url: "socks5://127.0.0.1:40000"
+
+  # Notes bisa ditambahkan untuk notifikasi
+  # - name: PROGO
+  #   origin: PSE
+  #   destination: LPN
+  #   date: "2026-03-15"
+  #   interval: 300
+  #   notes: "@username"
+  #   providers:
+  #     - bookingkai
