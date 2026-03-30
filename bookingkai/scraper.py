@@ -156,9 +156,9 @@ async def _get_nodriver_browser(proxy_url: str = ""):
         ]
 
         # Route Chrome through the proxy for better IP reputation
+        # Chrome works better with HTTP proxy format
         if proxy_url:
-            # Convert socks5h:// to socks5:// (Chrome doesn't understand socks5h)
-            chrome_proxy = proxy_url.replace("socks5h://", "socks5://")
+            chrome_proxy = proxy_url.replace("socks5h://", "http://").replace("socks5://", "http://")
             browser_args.append(f"--proxy-server={chrome_proxy}")
             logger.info("nodriver: using proxy %s", chrome_proxy)
 
