@@ -8,8 +8,6 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import os
-import shutil
 from urllib.parse import quote
 
 from bs4 import BeautifulSoup
@@ -39,7 +37,6 @@ MONTH_NAMES = [
 # ---------- Shared state for nodriver browser ----------
 _nodriver_browser = None
 _nodriver_lock = asyncio.Lock()
-_virtual_display = None
 
 
 def format_date_indo(date_str: str) -> str:
@@ -138,47 +135,7 @@ async def _fetch_with_curl_cffi(
         return trains
 
 
-# ========== Fallback: nodriver with Xvfb (non-headless) ==========
-
-def _has_display() -> bool:
-    """Check if a display server is available."""
-    return bool(os.environ.get("DISPLAY"))
-
-
-def _start_virtual_display():
-    """Start Xvfb virtual display if no display is available."""
-    global _virtual_display
-
-    if _has_display():
-        logger.debug("nodriver: display already available (%s)", os.environ["DISPLAY"])
-        return
-
-    # Check if Xvfb is installed
-    if not shutil.which("Xvfb") and not shutil.which("xvfb-run"):
-        logger.warning(
-            "nodriver: Xvfb not found. Install with: apt install xvfb. "
-            "Falling back to headless mode."
-        )
-        return
-
-    try:
-        from pyvirtualdisplay import Display
-
-        _virtual_display = Display(visible=0, size=(1920, 1080))
-        _virtual_display.start()
-        logger.info("nodriver: virtual display started (Xvfb)")
-    except ImportError:
-        # pyvirtualdisplay not installed, try manual Xvfb
-        logger.warning(
-            "nodriver: pyvirtualdisplay not installed. "
-            "Install with: pip install pyvirtualdisplay. "
-            "Falling back to headless mode."
-        )
-    except Exception as e:
-        logger.warning("nodriver: failed to start virtual display: %s", e)
-
-
-async def _get_nodriver_browser():
+async def _get_nodriver_browser(proxy_url: str = ""):
     """Get or create the shared nodriver browser instance."""
     global _nodriver_browser
 
@@ -193,30 +150,29 @@ async def _get_nodriver_browser():
                 "nodriver is not installed. Install with: pip install nodriver"
             )
 
-        # Start virtual display if needed (non-headless is much harder to detect)
-        _start_virtual_display()
+        browser_args = [
+            "--no-sandbox",
+            "--disable-dev-shm-usage",
+        ]
 
-        # Use headless only if we have no display at all
-        use_headless = not _has_display()
-        if use_headless:
-            logger.info("nodriver: starting in headless mode (no display available)")
-        else:
-            logger.info("nodriver: starting in non-headless mode (display available)")
+        # Route Chrome through the proxy for better IP reputation
+        if proxy_url:
+            # Convert socks5h:// to socks5:// (Chrome doesn't understand socks5h)
+            chrome_proxy = proxy_url.replace("socks5h://", "socks5://")
+            browser_args.append(f"--proxy-server={chrome_proxy}")
+            logger.info("nodriver: using proxy %s", chrome_proxy)
 
-        logger.info("nodriver: starting Chrome browser...")
+        logger.info("nodriver: starting headless Chrome browser...")
         _nodriver_browser = await uc.start(
-            headless=use_headless,
-            browser_args=[
-                "--no-sandbox",
-                "--disable-dev-shm-usage",
-            ],
+            headless=True,
+            browser_args=browser_args,
         )
         return _nodriver_browser
 
 
 async def close_nodriver_browser() -> None:
-    """Close the shared nodriver browser and virtual display."""
-    global _nodriver_browser, _virtual_display
+    """Close the shared nodriver browser."""
+    global _nodriver_browser
 
     async with _nodriver_lock:
         if _nodriver_browser is not None:
@@ -227,14 +183,6 @@ async def close_nodriver_browser() -> None:
             _nodriver_browser = None
             logger.info("nodriver: browser closed")
 
-        if _virtual_display is not None:
-            try:
-                _virtual_display.stop()
-            except Exception:
-                pass
-            _virtual_display = None
-            logger.info("nodriver: virtual display stopped")
-
 
 async def _fetch_with_nodriver(search_url: str, proxy_url: str = "") -> list[Train]:
     """Fetch trains using nodriver (undetected Chrome via Xvfb).
@@ -243,20 +191,11 @@ async def _fetch_with_nodriver(search_url: str, proxy_url: str = "") -> list[Tra
     to the search URL with cookies already established.
     Uses proxy if available for better IP reputation.
     """
-    browser = await _get_nodriver_browser()
-
-    # If proxy is configured, create a proxied browser context
-    # Convert socks5h:// to socks5:// (Chrome doesn't understand socks5h)
-    chrome_proxy = proxy_url.replace("socks5h://", "socks5://") if proxy_url else ""
-
-    if chrome_proxy:
-        logger.info("nodriver: using proxy %s", chrome_proxy)
-        tab = await browser.get("https://booking.kai.id/", new_tab=True)
-    else:
-        tab = await browser.get("https://booking.kai.id/")
+    browser = await _get_nodriver_browser(proxy_url)
 
     # Step 1: Visit homepage first to pass Cloudflare challenge
     logger.info("nodriver: visiting homepage to solve CF challenge...")
+    tab = await browser.get("https://booking.kai.id/")
 
     # Wait for CF challenge to resolve (give it plenty of time)
     await tab.sleep(12)
