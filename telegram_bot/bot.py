@@ -1,6 +1,6 @@
 """Telegram bot setup using python-telegram-bot v21+.
 
-Supports both webhook and polling modes.
+Uses webhook mode for receiving updates.
 """
 
 from __future__ import annotations
@@ -60,19 +60,6 @@ class TelegramBot:
         except Exception as e:
             logger.error("Failed to send telegram message: %s", e)
             return False
-
-    async def start_polling(self) -> None:
-        """Start the bot in long-polling mode."""
-        if not self._app:
-            raise RuntimeError("Bot not built. Call build() first.")
-
-        logger.info("Starting bot in polling mode...")
-        await self._app.initialize()
-        await self._app.start()
-        await self._app.updater.start_polling(
-            allowed_updates=["message"],
-            drop_pending_updates=True,
-        )
 
     async def start_webhook(self, port: int, webhook_url: str) -> None:
         """Start the bot in webhook mode.

@@ -256,17 +256,12 @@ async def main() -> None:
             "⚠️ Train validation failed (will retry via scheduler): %s", e
         )
 
-    # Start bot
-    startup_msg = f"🚀 Bot started!\nMonitoring {len(providers)} trains"
-    await tg_bot.send_message(startup_msg)
+    # Start bot (webhook mode)
+    logger.info("Starting bot in webhook mode...")
+    await tg_bot.start_webhook(cfg.webhook.port, cfg.webhook.url)
 
-    if cfg.webhook.enabled and cfg.webhook.url:
-        logger.info("Starting bot in webhook mode...")
-        await tg_bot.start_webhook(cfg.webhook.port, cfg.webhook.url)
-        startup_msg += f"\nWebhook: {cfg.webhook.url}"
-    else:
-        logger.info("Starting bot in polling mode...")
-        await tg_bot.start_polling()
+    startup_msg = f"🚀 Bot started!\nMonitoring {len(providers)} trains\nWebhook: {cfg.webhook.url}"
+    await tg_bot.send_message(startup_msg)
 
     logger.info("Bot running. Press Ctrl+C to exit.")
 
