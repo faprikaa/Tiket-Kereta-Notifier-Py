@@ -206,16 +206,26 @@ async def main() -> None:
 
     # Setup signal handlers
     loop = asyncio.get_running_loop()
+    main_task = asyncio.current_task()
+    _signal_count = 0
 
     def signal_handler():
-        logger.info("Received shutdown signal")
-        shutdown_event.set()
+        nonlocal _signal_count
+        _signal_count += 1
+        if _signal_count == 1:
+            logger.info("Received shutdown signal, cancelling...")
+            shutdown_event.set()
+            if main_task:
+                main_task.cancel()
+        else:
+            logger.info("Force exit")
+            import os
+            os._exit(1)
 
     for sig in (signal.SIGINT, signal.SIGTERM):
         try:
             loop.add_signal_handler(sig, signal_handler)
         except NotImplementedError:
-            # Windows doesn't support add_signal_handler for SIGTERM
             pass
 
     # Start schedulers with staggered delays
@@ -317,5 +327,5 @@ if __name__ == "__main__":
 
     try:
         asyncio.run(main())
-    except KeyboardInterrupt:
+    except (KeyboardInterrupt, asyncio.CancelledError):
         logger.info("Interrupted by user")
