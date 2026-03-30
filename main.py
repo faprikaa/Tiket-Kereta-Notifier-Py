@@ -12,6 +12,7 @@ import signal
 import sys
 
 from bookingkai import BookingKAIProvider, BrowserQueue
+from bookingkai.scraper import close_nodriver_browser
 from config import Config, load_config, parse_args
 from provider import Provider
 from telegram_bot.bot import TelegramBot
@@ -251,8 +252,9 @@ async def main() -> None:
         await validate_trains_exist(providers, cfg)
         logger.info("✅ All configured trains validated successfully")
     except RuntimeError as e:
-        logger.error("Train validation failed: %s", e)
-        sys.exit(1)
+        logger.warning(
+            "⚠️ Train validation failed (will retry via scheduler): %s", e
+        )
 
     # Start bot
     startup_msg = f"🚀 Bot started!\nMonitoring {len(providers)} trains"
@@ -295,6 +297,9 @@ async def main() -> None:
     # Close browser queue
     if bk_queue:
         await bk_queue.close()
+
+    # Close nodriver browser if it was started
+    await close_nodriver_browser()
 
     logger.info("Shutdown complete")
 

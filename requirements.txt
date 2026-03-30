@@ -3,3 +3,4 @@ python-telegram-bot[webhooks]>=21.0
 beautifulsoup4>=4.12
 lxml>=5.0
 PyYAML>=6.0
+nodriver>=0.38

@@ -1,7 +1,12 @@
-"""BookingKAI scraper using curl_cffi to bypass Cloudflare."""
+"""BookingKAI scraper with Cloudflare bypass.
+
+Primary: curl_cffi with browser impersonation and persistent session cookies.
+Fallback: nodriver (undetected Chrome via CDP) when Cloudflare blocks curl_cffi.
+"""
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from urllib.parse import quote
 
@@ -35,9 +40,9 @@ HEADERS = {
     "accept-language": "id-ID,id;q=0.9,en-US;q=0.8,en;q=0.7",
     "cache-control": "no-cache",
     "pragma": "no-cache",
-    "sec-ch-ua": '"Not:A-Brand";v="99", "Brave";v="133", "Chromium";v="133"',
+    "sec-ch-ua": '"Chromium";v="136", "Google Chrome";v="136", "Not.A/Brand";v="99"',
     "sec-ch-ua-mobile": "?0",
-    "sec-ch-ua-platform": '"Windows"',
+    "sec-ch-ua-platform": '"Linux"',
     "sec-fetch-dest": "document",
     "sec-fetch-mode": "navigate",
     "sec-fetch-site": "same-origin",
@@ -46,6 +51,10 @@ HEADERS = {
     "upgrade-insecure-requests": "1",
     "referer": "https://booking.kai.id/",
 }
+
+# ---------- Shared state for nodriver browser ----------
+_nodriver_browser = None
+_nodriver_lock = asyncio.Lock()
 
 
 def format_date_indo(date_str: str) -> str:
@@ -89,42 +98,48 @@ def is_cloudflare_challenge(html_content: str) -> bool:
     return any(marker in html_content for marker in markers)
 
 
-async def fetch_trains(
+# ========== Primary: curl_cffi with persistent session ==========
+
+async def _fetch_with_curl_cffi(
     search_url: str,
     proxy_url: str = "",
 ) -> list[Train]:
-    """Fetch and parse train data from booking.kai.id using curl_cffi.
+    """Fetch trains using curl_cffi with browser impersonation.
 
-    Uses browser impersonation to bypass Cloudflare protection.
-
-    Args:
-        search_url: The full booking.kai.id search URL
-        proxy_url: Optional SOCKS5/HTTP proxy URL
-
-    Returns:
-        List of Train objects parsed from the HTML response
-
-    Raises:
-        RuntimeError: If blocked by Cloudflare or request fails
+    Uses a persistent session to maintain cookies across requests.
+    First visits the homepage to obtain cf_clearance cookies, then
+    hits the search URL.
     """
     from curl_cffi.requests import AsyncSession
 
-    async with AsyncSession() as session:
-        kwargs = {
-            "url": search_url,
+    async with AsyncSession(impersonate="chrome") as session:
+        base_kwargs: dict = {
             "headers": HEADERS,
-            "impersonate": "chrome",
             "timeout": 60,
             "allow_redirects": True,
         }
-
         if proxy_url:
-            kwargs["proxy"] = proxy_url
+            base_kwargs["proxy"] = proxy_url
 
-        logger.debug("Fetching booking.kai.id: %s", search_url)
+        # Step 1: Visit homepage to establish cookies / pass initial CF check
+        logger.debug("curl_cffi: visiting homepage for cookies...")
+        try:
+            home_resp = await session.get(
+                "https://booking.kai.id/", **base_kwargs
+            )
+            if home_resp.status_code == 200 and not is_cloudflare_challenge(home_resp.text):
+                logger.debug("curl_cffi: homepage OK, cookies obtained")
+            else:
+                logger.debug(
+                    "curl_cffi: homepage returned CF challenge or non-200 (%s)",
+                    home_resp.status_code,
+                )
+        except Exception as e:
+            logger.debug("curl_cffi: homepage visit failed: %s", e)
 
-        response = await session.get(**kwargs)
-
+        # Step 2: Fetch the search results
+        logger.debug("curl_cffi: fetching search URL: %s", search_url)
+        response = await session.get(url=search_url, **base_kwargs)
         html_content = response.text
 
         # Check for Cloudflare blocks
@@ -140,9 +155,136 @@ async def fetch_trains(
             raise RuntimeError(f"Unexpected status code: {response.status_code}")
 
         trains = parse_html(html_content)
-        logger.info("BookingKAI fetch successful, trains found: %d", len(trains))
+        logger.info("curl_cffi: fetch successful, trains found: %d", len(trains))
         return trains
 
+
+# ========== Fallback: nodriver (headless Chrome via CDP) ==========
+
+async def _get_nodriver_browser():
+    """Get or create the shared nodriver browser instance."""
+    global _nodriver_browser
+
+    async with _nodriver_lock:
+        if _nodriver_browser is not None and not _nodriver_browser.stopped:
+            return _nodriver_browser
+
+        try:
+            import nodriver as uc
+        except ImportError:
+            raise RuntimeError(
+                "nodriver is not installed. Install with: pip install nodriver"
+            )
+
+        logger.info("nodriver: starting headless Chrome browser...")
+        _nodriver_browser = await uc.start(
+            headless=True,
+            browser_args=[
+                "--no-sandbox",
+                "--disable-gpu",
+                "--disable-dev-shm-usage",
+            ],
+        )
+        return _nodriver_browser
+
+
+async def close_nodriver_browser() -> None:
+    """Close the shared nodriver browser (for cleanup)."""
+    global _nodriver_browser
+
+    async with _nodriver_lock:
+        if _nodriver_browser is not None:
+            try:
+                _nodriver_browser.stop()
+            except Exception:
+                pass
+            _nodriver_browser = None
+            logger.info("nodriver: browser closed")
+
+
+async def _fetch_with_nodriver(search_url: str) -> list[Train]:
+    """Fetch trains using nodriver (undetected headless Chrome).
+
+    This can solve Cloudflare JS challenges since it runs a real browser.
+    """
+    browser = await _get_nodriver_browser()
+
+    logger.info("nodriver: navigating to %s", search_url)
+    tab = await browser.get(search_url)
+
+    # Wait for page to load and any CF challenge to resolve
+    await tab.sleep(5)
+
+    # Try verify_cf() in case there's a Turnstile challenge
+    try:
+        await tab.verify_cf()
+        await tab.sleep(3)
+    except Exception:
+        pass  # No CF challenge present, that's fine
+
+    # Wait and ensure the page is loaded
+    await tab
+
+    html_content = await tab.get_content()
+
+    # Close the tab to free resources (keep browser alive)
+    try:
+        await tab.close()
+    except Exception:
+        pass
+
+    # Verify we got past Cloudflare
+    if is_cloudflare_challenge(html_content):
+        raise RuntimeError("nodriver: still blocked by Cloudflare after challenge")
+
+    trains = parse_html(html_content)
+    logger.info("nodriver: fetch successful, trains found: %d", len(trains))
+    return trains
+
+
+# ========== Public API ==========
+
+async def fetch_trains(
+    search_url: str,
+    proxy_url: str = "",
+) -> list[Train]:
+    """Fetch and parse train data from booking.kai.id.
+
+    Strategy:
+    1. Try curl_cffi with browser impersonation (fast, lightweight)
+    2. If blocked by Cloudflare, fall back to nodriver (headless Chrome)
+
+    Args:
+        search_url: The full booking.kai.id search URL
+        proxy_url: Optional SOCKS5/HTTP proxy URL
+
+    Returns:
+        List of Train objects parsed from the HTML response
+
+    Raises:
+        RuntimeError: If both methods fail
+    """
+    # --- Primary: curl_cffi ---
+    try:
+        return await _fetch_with_curl_cffi(search_url, proxy_url)
+    except RuntimeError as e:
+        if "Cloudflare" in str(e):
+            logger.warning(
+                "curl_cffi blocked by Cloudflare, falling back to nodriver: %s", e
+            )
+        else:
+            raise
+
+    # --- Fallback: nodriver ---
+    try:
+        return await _fetch_with_nodriver(search_url)
+    except Exception as e:
+        raise RuntimeError(
+            f"Both curl_cffi and nodriver failed. Last error: {e}"
+        ) from e
+
+
+# ========== HTML Parsing ==========
 
 def parse_html(raw_html: str) -> list[Train]:
     """Extract train information from the booking.kai.id search results page.
