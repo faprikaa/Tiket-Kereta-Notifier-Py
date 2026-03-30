@@ -13,6 +13,7 @@ import sys
 
 from bookingkai import BookingKAIProvider, BrowserQueue
 from bookingkai.scraper import close_nodriver_browser
+from cloudflared import CloudflaredTunnel
 from config import Config, load_config, parse_args
 from provider import Provider
 from telegram_bot.bot import TelegramBot
@@ -256,11 +257,18 @@ async def main() -> None:
             "⚠️ Train validation failed (will retry via scheduler): %s", e
         )
 
+    # Start cloudflared tunnel to get public URL
+    tunnel = CloudflaredTunnel(cfg.webhook.port)
+    webhook_url = cfg.webhook.url
+    if not webhook_url:
+        webhook_url = await tunnel.start()
+        logger.info("Cloudflared tunnel URL: %s", webhook_url)
+
     # Start bot (webhook mode)
     logger.info("Starting bot in webhook mode...")
-    await tg_bot.start_webhook(cfg.webhook.port, cfg.webhook.url)
+    await tg_bot.start_webhook(cfg.webhook.port, webhook_url)
 
-    startup_msg = f"🚀 Bot started!\nMonitoring {len(providers)} trains\nWebhook: {cfg.webhook.url}"
+    startup_msg = f"🚀 Bot started!\nMonitoring {len(providers)} trains\nWebhook: {webhook_url}"
     await tg_bot.send_message(startup_msg)
 
     logger.info("Bot running. Press Ctrl+C to exit.")
@@ -295,6 +303,9 @@ async def main() -> None:
 
     # Close nodriver browser if it was started
     await close_nodriver_browser()
+
+    # Stop cloudflared tunnel
+    await tunnel.stop()
 
     logger.info("Shutdown complete")
 
